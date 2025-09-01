@@ -1,37 +1,37 @@
-import { test } from '../../../lib/tsr';
+import admin from "../../../lib/firebaseAdmin";
+
+function calcTax(telco, declaredAmount, realAmount) {
+  // realAmount: số tiền thực tế TSR trả sau khi trừ thuế
+  // declaredAmount: mệnh giá thẻ gốc
+  let totalTax = ["GARENA", "ZING", "VCOIN"].includes(telco.toUpperCase())
+    ? 15
+    : 20;
+
+  let tsrTax = 100 - (realAmount / declaredAmount) * 100;
+  let extraTax = totalTax - tsrTax;
+
+  return { totalTax, extraTax };
+}
+
 export default async function handler(req, res) {
-  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+  const { status, amount, value, request_id, telco, userId } = req.body;
 
-  const partnerKey = process.env.TSR_PARTNER_KEY;
-  if (!partnerKey) return res.status(500).json({ error: "Missing TSR_PARTNER_KEY" });
-
-  const { status, message, request_id, declared_value, value, amount, code, serial, telco, callback_sign } = req.body || {};
-
-  if (!verifyCallbackSign({ partnerKey, code, serial, callbackSign: callback_sign })) {
-    return res.status(403).json({ error: "Invalid callback_sign" });
+  if (status !== "success") {
+    return res.status(400).json({ error: "Card failed" });
   }
 
-  console.log("[TSR CALLBACK]", req.body);
+  // Tính thêm thuế
+  const { extraTax } = calcTax(telco, amount, value);
+  let finalValue = value - (value * extraTax) / 100;
 
-  if (Number(status) === 1 || Number(status) === 2) {
-    const declaredValue = Number(declared_value || value || 0);
-    const amountReceived = Number(amount || 0);
+  // Ghi vào Firestore
+  const db = admin.firestore();
+  await db
+    .collection("users")
+    .doc(userId)
+    .update({
+      balance: admin.firestore.FieldValue.increment(finalValue),
+    });
 
-    const desiredUserVnd = desiredUserVndFromDeclared(declaredValue, telco);
-    let finalUserVnd = Math.min(amountReceived, desiredUserVnd);
-
-    if (String(process.env.TSR_ABSORB_DEFICIT || "").toLowerCase() === "true") {
-      finalUserVnd = desiredUserVnd;
-    }
-
-    const robux = vndToRobux(finalUserVnd);
-
-    // TODO: cập nhật DB, cộng robux cho user
-    console.log(`[CREDIT] req=${request_id} telco=${telco} robux=${robux}`);
-
-    return res.status(200).json({ ok: true });
-  }
-
-  console.log("[TSR CALLBACK] non-success:", status, message);
-  return res.status(200).json({ ok: true });
+  res.status(200).json({ message: "User updated", finalValue });
 }
